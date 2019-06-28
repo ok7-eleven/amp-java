@@ -12,7 +12,10 @@ import java.nio.channels.SocketChannel;
 import java.nio.channels.SelectionKey;
 import java.util.List;
 import java.util.ArrayList;
-import java.util.TreeMap;
+import java.util.AbstractMap;
+import java.util.Comparator;
+import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.concurrent.Executor;
@@ -36,12 +39,16 @@ public class Reactor {
     private        TCPConnection          _connection;
     private        Selector               _selector;
     private        boolean                _running;
-    private        TreeMap<Long,Runnable> _pendingCalls;
+    private        PriorityQueue<Map.Entry<Long,Runnable>> _pendingCalls;
 
     public Reactor () throws IOException {
         _selector = Selector.open();
         _running = false;
-        _pendingCalls = new TreeMap<Long,Runnable>();
+        _pendingCalls = new PriorityQueue<>(11, new Comparator<Map.Entry<Long,Runnable>>() {
+	    public int compare(Map.Entry<Long,Runnable> o1, Map.Entry<Long,Runnable> o2) {
+	      return o1.getKey().compareTo(o2.getKey());
+	    }
+	});
     }
 
     /* It appears that this interface is actually unnamed in
@@ -553,20 +560,23 @@ public class Reactor {
      * timeout.  Negative timeout means "no timeout".
      */
     private long runUntilCurrent(long now) {
-        while (0 != _pendingCalls.size()) {
-            try {
-                long then = _pendingCalls.firstKey();
-                if (then < now) {
-                    Runnable r = _pendingCalls.remove((Object) new Long(then));
-                    r.run();
-                } else {
-                    return then - now;
-                }
-            } catch (NoSuchElementException nsee) {
-                nsee.printStackTrace();
-                throw new Error("Impossible; _pendingCalls.size was not zero");
-            }
-        }
+	for (;;) {
+	    Runnable r;
+	    synchronized(_pendingCalls) {
+		Map.Entry<Long,Runnable> head = _pendingCalls.peek();
+		if (head == null) {
+		    break;
+		}
+		long then = head.getKey();
+		if (then < now) {
+		    r = head.getValue();
+		    _pendingCalls.remove(head);
+		} else {
+		    return then - now;
+		}
+	    }
+	    r.run();
+	}
         return -1;
     }
 
@@ -605,7 +615,7 @@ public class Reactor {
     public void callLater(double secondsLater, Runnable runme) {
         long millisLater = (long) (secondsLater * 1000.0);
         synchronized(_pendingCalls) {
-            _pendingCalls.put(System.currentTimeMillis() + millisLater, runme);
+            _pendingCalls.add(new AbstractMap.SimpleImmutableEntry<>(System.currentTimeMillis() + millisLater, runme));
             // This isn't actually an interestOps
             interestOpsChanged();
         }
